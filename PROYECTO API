@@ -1,0 +1,224 @@
+import tkinter as tk
+from tkinter import ttk
+from tkinter import messagebox
+from tkinter import *
+import winsound
+import re
+import netmiko
+from netmiko import ConnectHandler
+
+
+#----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------#
+
+#VARIABLES CON EXPRESIONES REGULARES
+ip_pat = r"\d{1,4}\.\d{1,4}\.\d{1,4}\.\d{1,4}"
+mac_pat = r"[a-f0-9]{2}.[a-f0-9]{2}.[a-f0-9]{2}.[a-f0-9]{2}.[a-f0-9]{2}.[a-f0-9]{2}"
+mac_pat2 = r"[a-f0-9]{4}.[a-f0-9]{4}.[a-f0-9]{4}.[a-f0-9]{4}"
+groups_macT=r"\s*?\d\s+[a-f0-9]{4}\.[a-f0-9]{4}\.[a-f0-9]{4}\s+\w+\s+((Fa|Gi)\d{1,2}\/\d{1,2}\/?(\d{1,2})?)"
+local_int=r"Interface:\s*(.*),(.*):\s*(.*)"
+#VARIABLES CON COMANDOS PARA LOS DISPOSITIVOS
+sh_macaddT = "show mac address-table | in "
+sh_cdpn_det = "show cdp neighbors detail"
+sh_hostname = "show running-config | include hostname"
+#ESTA FUNCION SIRVE PARA VERIFICAR EL FORMATO DE LA MAC (SI CUMPLE LOS PARAMETROS O SECUENCIA)
+def COMPROVAR_FORMATO(var,patron):
+    formato = re.compile(patron)
+    revisar = formato.search(var)
+    if revisar == None:
+        messagebox.showinfo(message="Formato incorrecto para la Mac, Ejemplo: XX-AA-YY-00-DD-FF", title="ERROR")
+        return revisar
+    else:
+        return revisar.group()
+    
+#ESTA FUNCION YA REALIZA LA BUSQUEDA DE LA MAC VERIFICADA
+    
+def mac_perdida(mac,connect):
+    MACtable = connect.send_command(sh_macaddT + mac)
+    formato=re.compile(groups_macT)
+    revisar = formato.search(MACtable)
+    if revisar != None:
+        port = revisar.group(1)
+        print("Esa mac esta en el puerto: ",port)
+        
+    else:
+        #print("Esa mac no existe en esta red")
+        #messagebox.showinfo(message="That mac address doesn't exist on the network", title="ERROR")
+        return None
+    #ESTA VARIABLE ES PARA REALIZAR LA BUSQUEDA DE LA MAC POR MEDIO DEL CONMANDO CDP NEIGHBORS
+    CDPneighborsDet= connect.send_command(sh_cdpn_det)
+    CDPneighborsDet_list = CDPneighborsDet.split('\n')
+#ESTA VARIABLE ES PARA SACAR UNA LISTA DE TODAS LAS IP DE LOS VECINOS
+    allIPs = []  
+    for element in CDPneighborsDet_list:
+        if "IP address:" in element:
+            allIPs.append(element)
+
+#ESTA VARIABLE ES PARA UNA LISTA DE LA IP DEL VECINO DONDE SE ENCUENTRA LA MAC
+    IPs = []
+    [IPs.append(i) for i in allIPs if i not in IPs]
+    print(IPs)
+#ESTA VARIABLE ES PARA SACARUNA LISTA DE LAS INTERFACES DE ESE VECINO
+    allInt = []
+    for element in CDPneighborsDet_list:
+        if "Interface: " in element:
+            allInt.append(element)
+
+    INTs=[]
+    for element in allInt:
+        formato=re.compile(local_int)
+        revisar = formato.search(element)
+        INTs.append(revisar.group(1))
+#ESTE ES PARA DARLE EL PARAMETRO DEL NUMERO DEL SWITCH JUNTO CON EL NUMERO DEL PUERTO
+    i=0
+    for element in INTs:     
+        formato=re.compile(r"(Fa|Gi)[a-zA-Z]*([0-9]+\/[0-9]+\/?[0-9?]+)")
+        revisar=formato.search(element)
+        INTs[i]=revisar.group(1)+revisar.group(2)
+        i+=1
+#ES ESTA PARTE SE REALIZA LA CONEXION AL SIGUIENTE VECINO (EN CASO DE QUE SE ENCUENTRE LA MAC EN UN VECINO)        
+    if port in INTs:
+        
+        connect.disconnect()
+        
+        p=INTs.index(port)
+        ip = IPs[p]
+        formato = re.compile(ip_pat)
+        revisar = formato.search(ip)
+        ip = revisar.group()
+#CONEXION SECUNDARIA EN CASO DE ENCONTRASE EN UN VECINO
+        Device={
+            "host":ip,
+            "username":"cisco",
+            "device_type":"cisco_ios",
+            "secret":"cisco",
+            "password":"cisco",
+            }
+        try:
+            connection = ConnectHandler(**Device)
+            connection.enable() 
+        except:
+            #print(" No se logro la conexion")
+           # messagebox.showinfo(message="Failed to connect to the host", title="ERROR")
+           Salida.set("La conexion con el dispositivo no se ha realizado")
+           return None
+        
+        mac_perdida(mac, connection)
+        #en esta seccion se realiza la busqueda de la mac en el switch local (esto ocurre en caso que ya no se ha vista en los vecinos)
+    else:
+        Hostname = connect.send_command(sh_hostname)
+        formato=re.compile(r"hostname (.*)")
+        revisar=formato.search(Hostname)
+        Salida.set("El host se encuentra en  el "+revisar.group(1)+", en el puerto "+port)
+        print("El host se enecuentra en  el "+revisar.group(1)+", en el puerto/salida "+port)
+        return None
+
+def btn_busca():
+#RECUADROS DE TEXTO
+    while True:
+        mac = MAC.get()
+        ip = ip_device.get()
+        user = Perfil.get()
+        passw = Pass.get()
+
+        mac=mac.lower()
+        
+        mac_serch = COMPROVAR_FORMATO(mac,mac_pat)
+#ESTO ES LA CONVERSION DE FORMATO DE LA MAC A FORMATO CISCO
+        if  mac_serch != None:
+            mac_serch = mac_serch.replace("-","")
+            mac_serch = mac_serch.replace(".","")
+            mac_serch = mac_serch.replace(":","")
+            mac_serch = list(mac_serch)
+            mac_serch.insert(4,".")
+            mac_serch.insert(9,".")
+            mac_serch = "".join(mac_serch)
+ #ESTA ES LA CONEXION INICIAL QUE SE REALIZA AL INICAR LA INTERFAZ           
+            try:
+                Device={
+                    "host":ip,
+                    "username":user,
+                    "device_type":"cisco_ios",
+                    "secret":passw,
+                    "password":passw,
+                    }
+                net_connect = ConnectHandler(**Device)
+                net_connect.enable()
+                print("Conectado")
+            except:
+               # messagebox.showinfo(message="Connection error, wrong data (ip, username, or password)", title="ERROR")
+                break
+            fin = mac_perdida(mac_serch, net_connect)
+            
+            if fin == None:
+                break
+
+        else:
+            break
+
+winsound.PlaySound("hey", winsound.SND_FILENAME)
+
+Interfaz = tk.Tk()
+Interfaz.title("La Gran API")
+imagen_fondo=tk.PhotoImage(file="C:\\Users\\Particular\\Desktop\\Cx\\opcion_fondo1.png") 
+imag_fondo=tk.Label(Interfaz, image = imagen_fondo).place(x = 0,y= 0, relwidth = 1, relheight = 1)
+Interfaz.geometry("740x570+300+40")
+Interfaz.configure(bg = "#C4D29F")
+Interfaz.iconbitmap("Logo_api.ico")
+
+pañales = "#498381"
+sopa = "#9CA690"
+color_titles = "#498381"
+fuente_textos = ("Lucida Sans",14)
+fuente_titles = ("Lucida Sans",12)
+fuente_btns = ("Lucida Sans",10)
+color_btns = "#DDE1E3"
+color_btns_click = "#C5F349"
+color_letra_titles = "#FCFEFF"
+
+
+texto_usuario = tk.Label(Interfaz, text = "ᴜꜱᴜᴀʀɪᴏ:", font = fuente_titles, foreground = color_letra_titles, bg = color_titles)
+texto_usuario.place(x = 450, y = 115)
+
+texto_contraseña = tk.Label(Interfaz, text = "ᴄᴏɴᴛʀᴀꜱᴇÑᴀ:", font = fuente_titles, foreground = color_letra_titles, bg = color_titles)
+texto_contraseña.place(x = 450, y = 180)
+
+texto_core = tk.Label(Interfaz, text = "ɪᴘ ᴅᴇʟ ꜱᴡ:", font = fuente_titles, foreground = color_letra_titles, bg = color_titles)
+texto_core.place(x = 450, y = 50)
+
+texto_MAC = tk.Label(Interfaz, text = "ᴍᴀᴄ ᴀ ᴇɴᴄᴏɴᴛʀᴀʀ:", font = fuente_titles, foreground = color_letra_titles, bg = color_titles)
+texto_MAC.place(x = 450, y = 245)
+
+##Variables
+ip_device = tk.StringVar()
+Perfil = tk.StringVar()
+Pass = tk.StringVar()
+MAC = tk.StringVar()
+Salida = tk.StringVar()
+
+ip_device_txt = tk.Entry(Interfaz, textvariable = ip_device)
+ip_device_txt.place(x = 450, y = 80)
+ip_device_txt.config(width = 20, justify = "left", state = "normal", font = fuente_textos, bg=pañales)
+
+
+PerfilTxt = tk.Entry(Interfaz, textvariable = Perfil)
+PerfilTxt.place(x = 450, y = 145)
+PerfilTxt.config(width = 20, justify = "left", state = "normal", font = fuente_textos, bg=pañales)
+
+textoPassword = tk.Entry(Interfaz, textvariable = Pass)
+textoPassword.place(x = 450, y = 210)
+textoPassword.config(width = 20, justify = "left", state = "normal", font = fuente_textos, bg=pañales)
+
+textomac = tk.Entry(Interfaz, textvariable = MAC)
+textomac.place(x = 450, y = 275)
+textomac.config(width = 20, justify = "left", state = "normal", font = fuente_textos, bg=pañales)
+
+textoSalida = tk.Entry(Interfaz, textvariable = Salida)
+textoSalida.place(x = 10, y = 430, height = 100)
+textoSalida.config(width = 59, justify = "left", state = "normal", font = fuente_textos, bg=sopa)
+
+𝓑𝓾𝓼𝓬𝓪𝓻_𝓱𝓸𝓼𝓽1 = tk.Button(Interfaz, text = "ʙᴜꜱᴄᴀʀ ʜᴏꜱᴛ", bg = "old lace", command = btn_busca)
+𝓑𝓾𝓼𝓬𝓪𝓻_𝓱𝓸𝓼𝓽1.config(width = 15, height = 1, font = fuente_btns, activebackground = color_btns_click, bg = color_btns)
+𝓑𝓾𝓼𝓬𝓪𝓻_𝓱𝓸𝓼𝓽1.place(x = 500, y = 330)
+
+Interfaz.mainloop()                
+#Se acabooooooooooooooooooooooo
